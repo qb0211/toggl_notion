@@ -194,7 +194,7 @@ const getTimePerTag = async () => {
       }
     }
 
-    return {cardId: cardIdFromTagTitle(e.tag.name), totalTimeHours: totalTime / 3600}
+    return {cardId: cardIdFromTagTitle(e.tag.name), totalTimeHours: Math.round((totalTime / 3600) * 100) / 100}
   })
 
   return data
@@ -234,7 +234,7 @@ const updatePageWithTime = async (pageId, timeHours) => {
 // updates all the notion pages with the time in toggl per tag
 const updatePagesWithTime = async () => {
   const timePerTag = await getTimePerTag()
-  let i = 0
+  let i = 1
   let len = timePerTag.length
 
   for (const t of timePerTag) {
