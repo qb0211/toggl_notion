@@ -2,7 +2,7 @@
 // Notion cards are populated into tags in Toggl. 
 // Tagged toggl time entries are accumulated and stored in the notion card they reference
 // Assumes the Notion database has two schema items:
-// - CardIdentifier: 5 digit uuid (formula property. formula: 'slice(id(), 27)')
+// - CardId: 5 digit uuid (formula property. formula: 'slice(id(), 27)')
 // - TimeSpent: number
 
 const nodefetch = require("node-fetch")
@@ -26,15 +26,30 @@ const togglHeaders = {
 
 // this gets tag title for all entries in the database
 const getTagTitlesFromNotion = async () => {
+  let results = []
   try {
-    const response = await notion.databases.query({
-      database_id: notionDatabaseId,
-    })
+    let hasMore = false
+    let cursor = undefined
 
-    const titles = response.results.map((r) => {
-      const cardId = r.properties.CardIdentifier.formula.string
-      const cardTitle = r.properties.Name.title[0].plain_text.replace(" ", "-")
-      const tagTitle = cardId + "-" + cardTitle
+    do {
+      const response = await notion.databases.query({
+        database_id: notionDatabaseId,
+        start_cursor: cursor
+      })
+
+      results = [...results, ...response.results]
+
+      hasMore = response.has_more
+
+      if (hasMore)
+        cursor = response.next_cursor
+
+    } while (hasMore)
+
+    const titles = results.map((r) => {
+      const cardId = r.properties.CardId.formula.string
+      const cardTitle = r.properties.Projects.title[0].text.content
+      const tagTitle = cardId + ": " + cardTitle
 
       return { cardId, cardTitle, tagTitle }
     })
@@ -66,30 +81,57 @@ const getExistingTogglTags = async () => {
   }
 }
 
+// strips the card id from the tag title
+const cardIdFromTagTitle = (title) => {
+  const spl = title.split(':')
+  if (spl.length < 1)
+    return ''
+  
+  if (spl[0].length !== 5)
+    return ''
+
+  return spl[0]
+}
+
 // filters out cards that already have an associated tag
 const getTagsToAdd = (cardsFromNotion, existingTagTitles) => {
   return cardsFromNotion.filter(
-    (c) => !existingTagTitles.find((t) => t === c.tagTitle)
+    (c) => !existingTagTitles.find((t) => cardIdFromTagTitle(t) === c.cardId)
   ).map(c => c.tagTitle)
 }
 
+function sleep(milliseconds) {
+  const date = Date.now();
+  let currentDate = null;
+  do {
+    currentDate = Date.now();
+  } while (currentDate - date < milliseconds);
+}
 
 const addTagToToggl = async (tagTitle) => {
+  const body = {name: tagTitle, workspace_id: parseInt(togglWorkspaceId)}
+  console.log(body)
   try {
     await axios.post(`https://api.track.toggl.com/api/v9/workspaces/${togglWorkspaceId}/tags`, 
-      {name: tagTitle, workspace_id: 6833844}, 
+      body, 
       {headers: togglHeaders}
     )
   }
   catch (e) {
     console.log('error')
-    console.log(e)
+    console.log(e.message)
   }
 }
 
 const addTagsToToggl = async (tags) => {
-  for (const tag of tags)
+  let i = 1
+  let len = tags.length;
+
+  for (const tag of tags) {
     await addTagToToggl(tag)
+    sleep(500)
+    console.log(`Adding Tag ${tag} (${i++} of ${len})...`)
+  }
 }
 
 
@@ -101,7 +143,7 @@ const updateTagsInTogglFromNotion = async () => {
   const existingTags = await getExistingTogglTags()
 
   // filter tags that arent in there yet (not strictly necessary since toggl's api does this too)
-  const tagsToAdd = getTagsToAdd(tagTitles, existingTags)
+  const tagsToAdd = existingTags.length > 0 ? getTagsToAdd(tagTitles, existingTags) : tagTitles
 
   // add tags that aren't in there yet
   addTagsToToggl(tagsToAdd)
@@ -113,7 +155,11 @@ const getTogglEntriesByTag = async () => {
   try {
     const {data: tags} = await axios.get(`https://api.track.toggl.com/api/v9/workspaces/${togglWorkspaceId}/tags`, {headers: togglHeaders})
 
+    let i = 1
+    let len = tags.length
+
     for (const tag of tags) {
+      console.log(`Getting time entries for tag ${tag.name} (${i++} of ${len})`)
       const {data: tagEntries} = await axios.post(
       `https://api.track.toggl.com/reports/api/v3/workspace/${togglWorkspaceId}/search/time_entries`,
       {start_date: '2022-10-01', end_date: '2022-11-09', tag_ids: [tag.id]},
@@ -123,6 +169,8 @@ const getTogglEntriesByTag = async () => {
       
       if (tagEntries.length > 0)
         entries.push({tag, tagEntries})
+
+      sleep(500)
     }
 
     return entries
@@ -133,22 +181,9 @@ const getTogglEntriesByTag = async () => {
   }
 }
 
-// strips the card id from the tag title
-const cardIdFromTagTitle = (title) => {
-  const spl = title.split('-')
-  if (spl.length < 1)
-    return ''
-  
-  if (spl[0].length !== 5)
-    return ''
-
-  return spl[0]
-}
-
 // accumulate all the time spent on entries with a particular tag
 const getTimePerTag = async () => {
   const entries = await getTogglEntriesByTag()
-
   const data = entries.map(e => {
 
     let totalTime = 0
@@ -171,7 +206,7 @@ const getPageIdWithCardId = async (cardId) => {
     const response = await notion.databases.query({
       database_id: notionDatabaseId,
       filter: {
-        property: 'CardIdentifier',
+        property: 'CardId',
         formula: {string: {equals: cardId}},
       },
     })
@@ -199,9 +234,15 @@ const updatePageWithTime = async (pageId, timeHours) => {
 // updates all the notion pages with the time in toggl per tag
 const updatePagesWithTime = async () => {
   const timePerTag = await getTimePerTag()
+  let i = 0
+  let len = timePerTag.length
+
   for (const t of timePerTag) {
+    console.log(` Updating time in Notion for ${t.cardId} (${i++} of ${len})`)
     const pageId = await getPageIdWithCardId(t.cardId)
+    sleep(350)
     await updatePageWithTime(pageId, t.totalTimeHours)
+    sleep(350)
   }
 }
 
